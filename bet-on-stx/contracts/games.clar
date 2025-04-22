@@ -1,5 +1,5 @@
-;; Crypto Betting Protocol - Version 2
-;; Enhanced implementation with session tracking and bettor history
+;; Crypto Betting Protocol - Version 3
+;; A blockchain-based system for creating and participating in crypto price movement bets with reward distribution
 
 ;; Constants
 (define-constant ERR-NOT-PROTOCOL-ADMIN (err u1))
@@ -10,6 +10,8 @@
 (define-constant ERR-SETTLEMENT-PERIOD-ACTIVE (err u6))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u7))
 (define-constant ERR-INVALID-INPUT (err u8))
+(define-constant ERR-BET-EXISTS (err u9))
+(define-constant MAX-BET-ID u100) ;; Maximum allowed bet ID
 
 ;; Data Variables
 (define-data-var protocol-admin principal tx-sender)
@@ -24,8 +26,8 @@
     uint
     {
         asset-pair: (string-utf8 256),
-        target-price-hash: (buff 32),      
-        settlement-time: uint,             
+        target-price-hash: (buff 32),      ;; SHA256 hash of the expected price proof
+        settlement-time: uint,             ;; Settlement time (block height)
         reward: uint,
         settled: bool
     }
@@ -49,6 +51,12 @@
         attempts: uint,
         settled-at: (optional uint)
     }
+)
+
+;; Events
+(define-map settlement-records
+    uint
+    (list 10 {bettor: principal, settled-block: uint})
 )
 
 ;; Authorization
@@ -81,6 +89,12 @@
     (reward uint))
     (begin
         (asserts! (is-admin) ERR-NOT-PROTOCOL-ADMIN)
+        
+        ;; Validate bet-id is within acceptable range
+        (asserts! (<= bet-id MAX-BET-ID) ERR-INVALID-INPUT)
+        
+        ;; Check if bet already exists to prevent overwriting
+        (asserts! (is-none (map-get? crypto-bets bet-id)) ERR-BET-EXISTS)
         
         ;; Validate settlement time is in the future
         (asserts! (>= settlement-time (var-get current-block-height)) ERR-INVALID-INPUT)
@@ -170,6 +184,16 @@
                 ;; Distribute reward
                 (try! (stx-transfer? (get reward bet) (var-get protocol-admin) tx-sender))
                 
+                ;; Record settlement
+                (match (map-get? settlement-records bet-id)
+                    history (map-set settlement-records bet-id
+                        (unwrap! (as-max-len?
+                            (append history {bettor: tx-sender, settled-block: current-block})
+                            u10)
+                            ERR-INVALID-BET))
+                    (map-set settlement-records bet-id
+                        (list {bettor: tx-sender, settled-block: current-block})))
+                
                 (ok true))
             ERR-INCORRECT-PRICE-PROOF)))
 
@@ -183,6 +207,9 @@
 
 (define-read-only (get-bettor-profile (bettor principal))
     (map-get? bettor-profiles bettor))
+
+(define-read-only (get-settlement-data (bet-id uint))
+    (map-get? settlement-records bet-id))
 
 (define-read-only (get-current-height)
     (var-get current-block-height))
